@@ -241,14 +241,20 @@ export class NeuralwattAdapter extends LlmAdapter {
     const captured: ResponseTelemetry = {
       energyJoules: telemetry.energyJoules,
       costUsd: telemetry.costUsd,
+      carbonGrams: telemetry.carbonGrams,
       ...telemetry.queueSeconds === undefined ? {} : { queueSeconds: telemetry.queueSeconds },
+      ...telemetry.gridId === undefined ? {} : { gridId: telemetry.gridId },
+      ...telemetry.gridIntensityGco2PerKwh === undefined ? {} : { gridIntensityGco2PerKwh: telemetry.gridIntensityGco2PerKwh },
+      ...telemetry.carbonSource === undefined ? {} : { carbonSource: telemetry.carbonSource },
     }
     if (live.logEnergy
-      && (captured.energyJoules > 0 || captured.costUsd > 0 || captured.queueSeconds !== undefined)) {
+      && (captured.energyJoules > 0 || captured.costUsd > 0 || (captured.carbonGrams ?? 0) > 0 || captured.queueSeconds !== undefined)) {
       const parts = [
         `model=${options.model}`,
         `energy=${captured.energyJoules.toFixed(1)}J`,
         `cost=$${captured.costUsd.toFixed(6)}`,
+        `carbon=${(captured.carbonGrams ?? 0).toFixed(4)}g`,
+        ...captured.gridId === undefined ? [] : [`grid=${captured.gridId}`],
         ...captured.queueSeconds === undefined ? [] : [`queue=${captured.queueSeconds.toFixed(1)}s`],
       ]
       this.dependencies.logger.debug(`neuralwatt: ${parts.join(' ')}`)

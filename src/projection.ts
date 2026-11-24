@@ -33,8 +33,18 @@ export interface NeuralwattUsageView {
   energyJoules: number
   /** Billed cost in USD reported beside these responses. */
   costUsd: number
+  /** Grams of CO₂ equivalent reported beside these responses. */
+  carbonGrams: number
+  /** Whether any counted response reported carbon, so a zero is measured rather than missing. */
+  carbonKnown: boolean
   /** Last flex queue wait observed in this session. */
   lastQueueSeconds?: number
+  /** Grid the most recent response drew from. */
+  lastGridId?: string
+  /** That grid's carbon intensity in grams of CO₂ per kWh. */
+  lastGridIntensityGco2PerKwh?: number
+  /** How the most recent grid facts were obtained (`agent_cache`, `regional_fallback`, …). */
+  lastCarbonSource?: string
   /** Model that produced the most recent counted message. */
   lastModel?: string
 }
@@ -51,6 +61,8 @@ export const EMPTY_USAGE: NeuralwattUsageState = Object.freeze({
   cacheReadTokens: 0,
   energyJoules: 0,
   costUsd: 0,
+  carbonGrams: 0,
+  carbonKnown: false,
 })
 
 /** Minimal schema contract the session-projection registry calls (`parse`). */
@@ -76,6 +88,9 @@ function createUsageSchema(): SchemaLike<NeuralwattUsageState> {
       }
       const lastQueueSeconds = source.lastQueueSeconds
       const lastModel = source.lastModel
+      const lastGridId = source.lastGridId
+      const lastGridIntensityGco2PerKwh = source.lastGridIntensityGco2PerKwh
+      const lastCarbonSource = source.lastCarbonSource
       return {
         provider: source.provider,
         requests: count(source.requests),
@@ -84,9 +99,16 @@ function createUsageSchema(): SchemaLike<NeuralwattUsageState> {
         cacheReadTokens: count(source.cacheReadTokens),
         energyJoules: count(source.energyJoules),
         costUsd: count(source.costUsd),
+        carbonGrams: count(source.carbonGrams),
+        carbonKnown: source.carbonKnown === true,
         ...typeof lastQueueSeconds === 'number' && Number.isFinite(lastQueueSeconds) && lastQueueSeconds >= 0
           ? { lastQueueSeconds }
           : {},
+        ...typeof lastGridId === 'string' && lastGridId.length > 0 ? { lastGridId } : {},
+        ...typeof lastGridIntensityGco2PerKwh === 'number' && Number.isFinite(lastGridIntensityGco2PerKwh) && lastGridIntensityGco2PerKwh >= 0
+          ? { lastGridIntensityGco2PerKwh }
+          : {},
+        ...typeof lastCarbonSource === 'string' && lastCarbonSource.length > 0 ? { lastCarbonSource } : {},
         ...typeof lastModel === 'string' && lastModel.length > 0 ? { lastModel } : {},
       }
     },
@@ -132,9 +154,21 @@ export function applyUsage(state: NeuralwattUsageState, event: unknown): Neuralw
     cacheReadTokens: state.cacheReadTokens + count(usageFields?.cacheReadTokens),
     energyJoules: state.energyJoules + (telemetry?.energyJoules ?? 0),
     costUsd: state.costUsd + (telemetry?.costUsd ?? 0),
+    carbonGrams: state.carbonGrams + (telemetry?.carbonGrams ?? 0),
+    carbonKnown: state.carbonKnown || telemetry?.carbonGrams !== undefined,
     ...telemetry?.queueSeconds === undefined
       ? state.lastQueueSeconds === undefined ? {} : { lastQueueSeconds: state.lastQueueSeconds }
       : { lastQueueSeconds: telemetry.queueSeconds },
+    // Grid facts are latest-wins: a later response from another grid replaces them.
+    ...telemetry?.gridId === undefined
+      ? state.lastGridId === undefined ? {} : { lastGridId: state.lastGridId }
+      : { lastGridId: telemetry.gridId },
+    ...telemetry?.gridIntensityGco2PerKwh === undefined
+      ? state.lastGridIntensityGco2PerKwh === undefined ? {} : { lastGridIntensityGco2PerKwh: state.lastGridIntensityGco2PerKwh }
+      : { lastGridIntensityGco2PerKwh: telemetry.gridIntensityGco2PerKwh },
+    ...telemetry?.carbonSource === undefined
+      ? state.lastCarbonSource === undefined ? {} : { lastCarbonSource: state.lastCarbonSource }
+      : { lastCarbonSource: telemetry.carbonSource },
     ...model === undefined
       ? state.lastModel === undefined ? {} : { lastModel: state.lastModel }
       : { lastModel: model },

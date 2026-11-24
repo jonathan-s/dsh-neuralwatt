@@ -1,6 +1,6 @@
 # dsh-neuralwatt-provider
 
-Neuralwatt models for DeepSeek Harness: Kimi, GLM, Qwen, DeepSeek, Gemma, MiMo and the Neuralwatt house models, with reasoning efforts, vision, tool calls, and the energy and billed-cost telemetry Neuralwatt streams beside every response.
+Neuralwatt models for DeepSeek Harness: Kimi, GLM, Qwen, DeepSeek, Gemma, MiMo and the Neuralwatt house models, with reasoning efforts, vision, tool calls, and the energy, carbon, and billed-cost telemetry Neuralwatt streams beside every response.
 
 The route behaves like a shipped provider, not like a port: it resolves its credential through the harness credential seam, reads its settings per request, appears in the configurable-provider directory with endpoint discovery, owns a provider retry policy, maps provider failures onto the harness failure taxonomy, and stores its per-response telemetry in the session log so a later reload, resume, or fork reproduces it. A Web pill shows the session's energy and cost, and a provider-card extension shows the account quota.
 
@@ -33,11 +33,11 @@ This is a port of [`monotykamary/pi-neuralwatt-provider`](https://github.com/mon
 | Configurable-provider entry | Route, endpoint, credential variable, and the settings namespace its fields live in |
 | Provider retry policy | `retryPolicy` in config, executed by `dsh-llm-retry`; the route re-registers when it changes |
 | Failure taxonomy | `AUTH`, `QUOTA`, `RATE_LIMIT`, `CONTEXT_WINDOW_EXCEEDED`, `INVALID_REQUEST`, `SERVER`, `HTTP_<status>`; `Retry-After` and request id are retained |
-| Durable telemetry | Energy, billed cost, and flex queue wait in the assistant message's replay state |
-| Session projection | `neuralwattUsage`: per-session requests, tokens, cached tokens, energy, cost, last queue wait |
-| Composer pill | Energy and billed cost for this session, in the shipped tertiary tone, with a click-open energy detail panel |
+| Durable telemetry | Energy, carbon (CO₂e) with grid facts, billed cost, and flex queue wait in the assistant message's replay state |
+| Session projection | `neuralwattUsage`: per-session requests, tokens, cached tokens, energy, carbon, grid, cost, last queue wait |
+| Composer pill | Energy, billed cost, and carbon for this session, in the shipped tertiary tone, with a click-open detail panel |
 | Provider card | API-key entry and account quota in Settings → Models, served by `/api/neuralwatt.quota` |
-| `neuralwatt_status` tool | Session usage plus account quota, offered only to steps routed to this provider |
+| `neuralwatt_status` tool | Session usage, carbon footprint, and account quota, offered only to steps routed to this provider |
 
 ## Install
 
@@ -150,13 +150,13 @@ Omission of `retryPolicy` retries `EMPTY_RESPONSE`, `RATE_LIMIT`, `SERVER`, `TIM
 
 ## Energy, cost and quota
 
-Neuralwatt reports energy and billed cost as SSE comment frames (`: energy {...}`, `: cost {...}`), not as payload fields. The adapter reads those frames without disturbing the token stream, attaches them to the terminal `finish` chunk's replay state, and the session log persists them with the assistant message. Flex-tier requests are held in a server-side queue that emits empty-delta heartbeats; the first real delta gives the queue wait.
+Neuralwatt reports energy, carbon, and billed cost as SSE comment frames (`: energy {...}`, `: cost {...}`), not as payload fields. The adapter reads those frames without disturbing the token stream, attaches them to the terminal `finish` chunk's replay state, and the session log persists them with the assistant message. The `: energy` frame also carries the carbon footprint (`carbon_g_co2eq`), the grid the reporting node drew from (`grid_id`), that grid's intensity (`grid_carbon_intensity_gco2perkwhr`), and how those facts were obtained (`carbon_source`); grid facts are latest-wins, and an intensity from a fallback source is reported with a `~` marker. Flex-tier requests are held in a server-side queue that emits empty-delta heartbeats; the first real delta gives the queue wait.
 
 From that durable data:
 
-- the `neuralwattUsage` session projection publishes requests, tokens, cached tokens, energy, cost, and the last queue wait per session;
-- the composer pill shows the session's energy and billed cost in the same tertiary tone as the shipped statistics pills, and opens a click-to-open detail panel with requests, input, cached and output tokens, exact billed cost, the last flex queue wait, and the last model; it renders nothing for a session that has not used the route;
-- the Settings → Models provider card shows the account quota, read from `/api/neuralwatt.quota`;
+- the `neuralwattUsage` session projection publishes requests, tokens, cached tokens, energy, carbon, the last grid facts, cost, and the last queue wait per session;
+- the composer pill shows the session's energy, billed cost, and carbon in the same tertiary tone as the shipped statistics pills, and opens a detail panel with requests, input, cached and output tokens, exact billed cost, carbon footprint, grid region and intensity, the last flex queue wait, and the last model; it renders nothing for a session that has not used the route;
+- the Settings → Models provider card shows the account quota and stores the API key, read from and written through `/api/neuralwatt.quota` and the credential seam;
 - the model can call `neuralwatt_status` for the same session figures plus plan, credits, and monthly and lifetime spend.
 
 The status tool is registered only for a step routed to this provider, so other sessions never see it. Quota snapshots are cached for one minute; a failure degrades to "unavailable" instead of failing a model request.
@@ -188,7 +188,7 @@ adapter         →  serialize DSH messages → OpenAI Chat Completions JSON
 | `src/discovery.ts` | `GET /models` interrogation for draft endpoints |
 | `src/quota.ts` | Quota snapshot, cache, and report |
 | `src/images.ts` | Request-image projection |
-| `src/energy.ts` | Energy/cost comment capture, flex queue tracking, formatting |
+| `src/energy.ts` | Energy/carbon/grid and cost comment capture, flex queue tracking, formatting |
 | `src/routes.ts` | Route id and exact-path names |
 | `client.js` | Web half: composer pill and provider-card quota |
 | `locale/*.json` | Plugin Manager title, description, and detail document |
@@ -233,6 +233,7 @@ The projector drops classifiers, strips the `neuralwatt/` prefix from MCR ids, a
 - **Classifiers.** Upstream exposes Clef Flash and mammoth-1 through pi's classifier registry. DSH has no equivalent seam here, so they are filtered out rather than shown as chat models that would fail.
 - **Model discovery is on demand.** The catalog is checked in; the Models page's "fetch available models" action asks `GET /models` (or the shipped catalog for this route), but nothing refreshes the list in the background.
 - **Image token pricing.** Neuralwatt publishes no visual-token formula, so the adapter declares the request-image projection it sends and lets the harness's neutral estimate price image input. It does not declare a provider price.
+- **Carbon history.** Carbon is captured from each response's `: energy` frame and stored with that message. Responses recorded before this build carry no carbon, so a session spanning the upgrade reports carbon only for later turns and shows "not reported" until one arrives; a measured zero is still reported as zero.
 - **Timeouts are two bounds.** `requestTimeoutMs` is an overall deadline, and `idleTimeoutMs` fails a stream that stops making progress; a very long flex queue wait counts against the overall deadline.
 - **Web rendering.** The pill and the provider card are contributions to shipped slots, so they follow the host's layout and theme; the page must be refreshed once after the first install to load `client.js`, and their rendered appearance was not verified without browser control.
 

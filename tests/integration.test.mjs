@@ -151,7 +151,7 @@ test('stream() translates text, reasoning, a tool call, usage, energy and finish
     request.on('end', () => {
       received = { headers: request.headers, body: JSON.parse(body) }
       response.writeHead(200, { 'content-type': 'text/event-stream' })
-      response.write(': energy {"energy_joules": 42.5}\n\n')
+      response.write(': energy {"energy_joules": 42.5, "carbon_g_co2eq": 1.25, "grid_id": "FI", "grid_carbon_intensity_gco2perkwhr": 42, "carbon_source": "agent_cache"}\n\n')
       response.write(frame({ created: 100, choices: [{ delta: { reasoning_content: 'think' } }] }))
       response.write(frame({ created: 105, choices: [{ delta: { content: 'Hel' } }] }))
       response.write(frame({ created: 105, choices: [{ delta: { content: 'lo' } }] }))
@@ -207,7 +207,14 @@ test('stream() translates text, reasoning, a tool call, usage, energy and finish
     assert.deepEqual(finish.reason, { kind: 'tool-calls' })
     assert.equal(finish.replayState.response.kind, 'neuralwatt-chat')
     assert.equal(finish.replayState.response.model, 'deepseek-v4.1-flash')
-    assert.deepEqual(finish.replayState.response.telemetry, { energyJoules: 42.5, costUsd: 0.0025 })
+    assert.deepEqual(finish.replayState.response.telemetry, {
+      energyJoules: 42.5,
+      costUsd: 0.0025,
+      carbonGrams: 1.25,
+      gridId: 'FI',
+      gridIntensityGco2PerKwh: 42,
+      carbonSource: 'agent_cache',
+    })
     assert.deepEqual(finish.replayState.blocks, [{ type: 'reasoning' }, { type: 'text' }, { type: 'tool-call' }])
   } finally {
     await server.close()
@@ -290,6 +297,11 @@ test('status tool reports session totals and survives an unreachable quota endpo
     cacheReadTokens: 200,
     energyJoules: 5400,
     costUsd: 0.0042,
+    carbonGrams: 1.26,
+    carbonKnown: true,
+    lastGridId: 'FI',
+    lastGridIntensityGco2PerKwh: 42,
+    lastCarbonSource: 'agent_cache',
     lastQueueSeconds: 4,
     lastModel: 'deepseek-v4.1-flash',
   })
@@ -300,6 +312,8 @@ test('status tool reports session totals and survives an unreachable quota endpo
   assert.match(value.report, /Session requests: 2/)
   assert.match(value.report, /1,200 in, 340 out, 200 cached/)
   assert.match(value.report, /Session energy: 1\.500 Wh; billed \$0\.004200/)
+  assert.match(value.report, /Session carbon: 1\.26 g CO\u2082e/)
+  assert.match(value.report, /Grid: FI · 42 g CO\u2082\/kWh/)
   assert.match(value.report, /Last flex queue wait: 4\.0 s/)
   assert.match(value.report, /Account quota: unavailable/)
 })

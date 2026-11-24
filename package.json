@@ -39,7 +39,8 @@
     "pretest": "npm run build",
     "test": "node --test tests/",
     "check": "tsc --noEmit && node --test tests/",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "precheck": "npm run build"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",

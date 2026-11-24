@@ -22,7 +22,7 @@ import { NeuralwattAdapter } from './adapter.js'
 import { Catalog } from './catalog.js'
 import { resolveApiKey } from './credentials.js'
 import { discoverModels } from './discovery.js'
-import { formatEnergy } from './energy.js'
+import { formatCarbon, formatEnergy } from './energy.js'
 import {
   BASE_URL_ENV,
   DEFAULT_API_KEY_ENV,
@@ -201,9 +201,9 @@ export function apply(ctx: Context, config: Config): void {
     child.tools.register(defineTool({
       name: 'neuralwatt_status',
       description:
-        'Report Neuralwatt usage for this session (requests, tokens, energy, billed cost, last flex queue wait) and the '
-        + 'account quota (plan, credits, monthly and lifetime spend). Use it when the user asks about spend, energy use, '
-        + 'or remaining credits for the Neuralwatt route.',
+        'Report Neuralwatt usage for this session (requests, tokens, energy, carbon footprint, billed cost, last flex '
+        + 'queue wait) and the account quota (plan, credits, monthly and lifetime spend). Use it when the user asks about '
+        + 'spend, energy use, carbon emissions, or remaining credits for the Neuralwatt route.',
       parameters: {},
       output: {
         schema: {
@@ -227,7 +227,17 @@ export function apply(ctx: Context, config: Config): void {
             + `${usage.outputTokens.toLocaleString('en-US')} out`
             + (usage.cacheReadTokens > 0 ? `, ${usage.cacheReadTokens.toLocaleString('en-US')} cached` : ''),
             `Session energy: ${formatEnergy(usage.energyJoules)}; billed $${usage.costUsd.toFixed(6)}`,
+            usage.carbonKnown
+              ? `Session carbon: ${formatCarbon(usage.carbonGrams)} CO\u2082e`
+              : 'Session carbon: no carbon data reported yet',
           )
+          if (usage.lastGridId !== undefined) {
+            const intensity = usage.lastGridIntensityGco2PerKwh === undefined
+              ? ''
+              : ` \u00b7 ${usage.lastGridIntensityGco2PerKwh.toFixed(0)} g CO\u2082/kWh`
+            const approximate = /fallback/i.test(usage.lastCarbonSource ?? '') ? '~' : ''
+            lines.push(`Grid: ${usage.lastGridId}${intensity}${approximate === '' ? '' : ' (~estimate)'}`)
+          }
           if (usage.lastQueueSeconds !== undefined) lines.push(`Last flex queue wait: ${usage.lastQueueSeconds.toFixed(1)} s`)
         }
         lines.push('')
@@ -261,6 +271,7 @@ export const __internals = {
   captureQueue,
   createTelemetry,
   formatEnergy,
+  formatCarbon,
   resolveOptions,
   registrationFacts,
   applyUsage,

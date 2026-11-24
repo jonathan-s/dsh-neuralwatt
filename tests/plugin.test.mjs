@@ -14,6 +14,7 @@ const {
   captureQueue,
   createTelemetry,
   formatEnergy,
+  formatCarbon,
   resolveOptions,
   registrationFacts,
   applyUsage,
@@ -253,13 +254,18 @@ test('mapFinish maps terminal reasons', () => {
 
 test('energy comments accumulate across frames and queue heartbeats resolve', () => {
   const state = createTelemetry()
-  captureComment('energy {"energy_joules": 10}', state)
-  captureComment('energy {"energy_joules": 2.5}', state)
+  captureComment('energy {"energy_joules": 10, "carbon_g_co2eq": 0.4, "grid_id": "FI", "grid_carbon_intensity_gco2perkwhr": 42, "carbon_source": "agent_cache"}', state)
+  captureComment('energy {"energy_joules": 2.5, "carbon_g_co2eq": 0.1, "grid_id": "SE"}', state)
   captureComment('cost {"request_cost_usd": 0.004}', state)
   captureComment('mcr-session {"session":"s1"}', state)
   captureComment('not-telemetry', state)
   assert.equal(state.energyJoules, 12.5)
   assert.equal(state.costUsd, 0.004)
+  assert.equal(state.carbonGrams, 0.5)
+  // Grid facts are latest-wins within one response.
+  assert.equal(state.gridId, 'SE')
+  assert.equal(state.gridIntensityGco2PerKwh, 42)
+  assert.equal(state.carbonSource, 'agent_cache')
   assert.deepEqual(state.mcrSession, { session: 's1' })
 
   const tracker = { sawContent: false }
@@ -270,6 +276,12 @@ test('energy comments accumulate across frames and queue heartbeats resolve', ()
   assert.equal(formatEnergy(0), '0 J')
   assert.match(formatEnergy(12.5), /J$/)
   assert.match(formatEnergy(3_600_000), /kWh$/)
+
+  assert.equal(formatCarbon(0), '0 g')
+  assert.equal(formatCarbon(0.5), '500.00 mg')
+  assert.equal(formatCarbon(1.26), '1.26 g')
+  assert.equal(formatCarbon(42), '42.0 g')
+  assert.equal(formatCarbon(2100), '2.10 kg')
 })
 
 test('resolveOptions validates and detaches settings', () => {
@@ -296,7 +308,11 @@ test('projection folds durable telemetry and token usage per session', () => {
   const replayState = replayEnvelope('deepseek-v4.1-flash', [{ type: 'text' }], {
     energyJoules: 42.5,
     costUsd: 0.0025,
+    carbonGrams: 1.25,
     queueSeconds: 3,
+    gridId: 'FI',
+    gridIntensityGco2PerKwh: 42,
+    carbonSource: 'agent_cache',
   })
   const event = assistantEvent({
     replayState,
@@ -309,6 +325,11 @@ test('projection folds durable telemetry and token usage per session', () => {
   assert.equal(once.cacheReadTokens, 20)
   assert.equal(once.energyJoules, 42.5)
   assert.equal(once.costUsd, 0.0025)
+  assert.equal(once.carbonGrams, 1.25)
+  assert.equal(once.carbonKnown, true)
+  assert.equal(once.lastGridId, 'FI')
+  assert.equal(once.lastGridIntensityGco2PerKwh, 42)
+  assert.equal(once.lastCarbonSource, 'agent_cache')
   assert.equal(once.lastQueueSeconds, 3)
   assert.equal(once.lastModel, 'deepseek-v4.1-flash')
 
@@ -323,14 +344,46 @@ test('projection folds durable telemetry and token usage per session', () => {
   // Unusable numbers are sanitized rather than published as NaN or negatives.
   assert.equal(usageProjectionDefinition.wire.viewSchema.parse({ provider: 'x', requests: -1 }).requests, 0)
   assert.throws(() => usageProjectionDefinition.wire.viewSchema.parse('nope'), /expected an object/)
+  // An envelope from before carbon capture reads as unknown, never as a measured zero.
+  const legacy = replayEnvelope('deepseek-v4.1-flash', [{ type: 'text' }], { energyJoules: 1, costUsd: 0 })
+  const legacyState = applyUsage(usageProjectionDefinition.init(), assistantEvent({ replayState: legacy, usage: { inputTokens: 1, outputTokens: 1 } }))
+  assert.equal(legacyState.carbonKnown, false)
+  assert.equal(legacyState.carbonGrams, 0)
+
+  // A checkpoint stored before carbon existed restores to the same state the
+  // full replay produces, so the added optional fields keep stateVersion 1.
+  const checkpoint = usageProjectionDefinition.stateSchema.parse({
+    provider: 'neuralwatt',
+    requests: 1,
+    inputTokens: 100,
+    outputTokens: 20,
+    cacheReadTokens: 0,
+    energyJoules: 10,
+    costUsd: 0,
+  })
+  const next = assistantEvent({ replayState, usage: { inputTokens: 5, outputTokens: 5 } })
+  const fromCheckpoint = applyUsage(checkpoint, next)
+  const fromReplay = applyUsage({ ...checkpoint, carbonGrams: 0, carbonKnown: false }, next)
+  assert.deepEqual(fromCheckpoint, fromReplay)
 })
 
 test('replay envelope round-trips and refuses cross-model replay', () => {
   const envelope = replayEnvelope('deepseek-v4.1-flash', [{ type: 'reasoning' }, { type: 'text' }], {
     energyJoules: 1,
     costUsd: 0,
+    carbonGrams: 0.25,
+    gridId: 'FR',
+    gridIntensityGco2PerKwh: 56,
+    carbonSource: 'regional_fallback',
   })
-  assert.deepEqual(readTelemetry(envelope), { energyJoules: 1, costUsd: 0 })
+  assert.deepEqual(readTelemetry(envelope), {
+    energyJoules: 1,
+    costUsd: 0,
+    carbonGrams: 0.25,
+    gridId: 'FR',
+    gridIntensityGco2PerKwh: 56,
+    carbonSource: 'regional_fallback',
+  })
   assert.equal(readTelemetry({ response: { kind: 'other' } }), undefined)
 })
 

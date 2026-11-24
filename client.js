@@ -41,6 +41,9 @@ window.__ModuleLoader__.load({
       'usage.title': 'Neuralwatt energy',
       'usage.energy': 'Energy',
       'usage.cost': 'Billed cost',
+      'usage.carbon': 'Carbon footprint',
+      'usage.grid': 'Grid',
+      'usage.notReported': 'not reported',
       'usage.requests': 'Requests',
       'usage.input': 'Input tokens',
       'usage.cacheRead': 'Cached input',
@@ -67,6 +70,9 @@ window.__ModuleLoader__.load({
       'usage.title': 'Neuralwatt 能耗',
       'usage.energy': '能耗',
       'usage.cost': '计费成本',
+      'usage.carbon': '碳足迹',
+      'usage.grid': '电网',
+      'usage.notReported': '暂无数据',
       'usage.requests': '请求数',
       'usage.input': '输入 Token',
       'usage.cacheRead': '缓存输入',
@@ -98,6 +104,17 @@ window.__ModuleLoader__.load({
       const wh = joules / 3600
       if (wh >= 1) return `${wh.toFixed(3)} Wh`
       return `${(joules / 1000).toFixed(3)} mWh`
+    }
+
+    /** Grams of CO₂e in the same unit ladder as the Host report. */
+    function formatCarbon(grams) {
+      if (!Number.isFinite(grams) || grams <= 0) return '0 g'
+      if (grams < 1) return `${(grams * 1000).toFixed(2)} mg`
+      if (grams < 1000) {
+        const decimals = grams < 10 ? 2 : grams < 100 ? 1 : 0
+        return `${grams.toFixed(decimals)} g`
+      }
+      return `${(grams / 1000).toFixed(2)} kg`
     }
 
     /** Compact USD amount that keeps sub-cent spend legible. */
@@ -269,11 +286,22 @@ window.__ModuleLoader__.load({
 
       const energy = formatEnergy(usage.energyJoules)
       const cost = formatUsd(usage.costUsd)
-      const reading = `${energy} · ${cost}`
+      const carbonKnown = usage.carbonKnown === true
+      const carbon = carbonKnown ? `${formatCarbon(usage.carbonGrams)} CO\u2082` : null
+      const reading = [energy, cost, carbon].filter(value => value !== null).join(' \u00b7 ')
       const aria = `${tr('usage.aria')}: ${reading}`
+
+      const gridIntensity = usage.lastGridIntensityGco2PerKwh
+      const gridText = usage.lastGridId === undefined
+        ? null
+        : `${usage.lastGridId}${typeof gridIntensity === 'number'
+          ? ` \u00b7 ${gridIntensity.toFixed(0)} g CO\u2082/kWh${/fallback/i.test(usage.lastCarbonSource ?? '') ? ' (~estimate)' : ''}`
+          : ''}`
 
       const rows = [
         [tr('usage.energy'), energy],
+        [tr('usage.carbon'), carbon === null ? tr('usage.notReported') : `${formatCarbon(usage.carbonGrams)} CO\u2082e`],
+        ...gridText === null ? [] : [[tr('usage.grid'), gridText]],
         [tr('usage.cost'), formatExactUsd(usage.costUsd)],
         [tr('usage.requests'), exactCount(usage.requests)],
         [tr('usage.input'), exactCount(usage.inputTokens)],
@@ -330,7 +358,9 @@ window.__ModuleLoader__.load({
       h('span', { style: labelStyle },
         h('span', null, energy),
         h('span', { style: sepStyle, 'aria-hidden': true }, '\u00b7'),
-        h('span', null, cost))),
+        h('span', null, cost),
+        carbon === null ? null : h('span', { style: sepStyle, 'aria-hidden': true }, '\u00b7'),
+        carbon === null ? null : h('span', null, carbon))),
       open ? body : null)
     }
 

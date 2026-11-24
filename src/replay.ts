@@ -35,8 +35,20 @@ export interface ResponseTelemetry {
   energyJoules: number
   /** Billed cost in USD reported by every `: cost` frame. */
   costUsd: number
+  /**
+   * Grams of CO₂ equivalent reported beside the energy accounting. Absent on
+   * envelopes written before carbon was captured, which reads as unknown rather
+   * than as a measured zero.
+   */
+  carbonGrams?: number
   /** Server queue wait implied by flex heartbeats, when the stream emitted them. */
   queueSeconds?: number
+  /** Grid the reporting node drew from. */
+  gridId?: string
+  /** That grid's carbon intensity in grams of CO₂ per kWh. */
+  gridIntensityGco2PerKwh?: number
+  /** How the grid facts were obtained (`agent_cache`, `regional_fallback`, …). */
+  carbonSource?: string
 }
 
 /** Decoded envelope, detached from the durable message source. */
@@ -71,10 +83,20 @@ function decode(raw: unknown): DecodedReplay | undefined {
     const costUsd = amount(source.costUsd)
     if (energyJoules !== undefined && costUsd !== undefined) {
       const queueSeconds = amount(source.queueSeconds)
+      const gridIntensityGco2PerKwh = amount(source.gridIntensityGco2PerKwh)
+      const gridId = typeof source.gridId === 'string' && source.gridId.length > 0 ? source.gridId : undefined
+      const carbonSource = typeof source.carbonSource === 'string' && source.carbonSource.length > 0
+        ? source.carbonSource
+        : undefined
+      const carbonGrams = amount(source.carbonGrams)
       telemetry = {
         energyJoules,
         costUsd,
+        ...carbonGrams === undefined ? {} : { carbonGrams },
         ...queueSeconds === undefined ? {} : { queueSeconds },
+        ...gridId === undefined ? {} : { gridId },
+        ...gridIntensityGco2PerKwh === undefined ? {} : { gridIntensityGco2PerKwh },
+        ...carbonSource === undefined ? {} : { carbonSource },
       }
     }
   }
@@ -121,7 +143,11 @@ export function replayEnvelope(
         telemetry: {
           energyJoules: telemetry.energyJoules,
           costUsd: telemetry.costUsd,
+          ...telemetry.carbonGrams === undefined ? {} : { carbonGrams: telemetry.carbonGrams },
           ...telemetry.queueSeconds === undefined ? {} : { queueSeconds: telemetry.queueSeconds },
+          ...telemetry.gridId === undefined ? {} : { gridId: telemetry.gridId },
+          ...telemetry.gridIntensityGco2PerKwh === undefined ? {} : { gridIntensityGco2PerKwh: telemetry.gridIntensityGco2PerKwh },
+          ...telemetry.carbonSource === undefined ? {} : { carbonSource: telemetry.carbonSource },
         },
       },
     },
