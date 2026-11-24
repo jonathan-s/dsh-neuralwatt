@@ -1,0 +1,11 @@
+# Bundle layer contributed by dsh-neuralwatt-provider.
+# Inserts the Neuralwatt route next to the shipped adapters. Edit the profile's
+# own cordis.patch.yml to override any field below; a bundle layer is the
+# package default, not the user's document.
+- insert:
+    - id: llm-neuralwatt
+      name: 'dsh-neuralwatt-provider'
+      config:
+        baseURL: https://api.neuralwatt.com/v1
+        apiKeyEnv: NEURALWATT_API_KEY
+        displayName: Neuralwatt
