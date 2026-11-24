@@ -5,8 +5,8 @@
  * - a composer-dock pill showing this session's Neuralwatt energy and billed
  *   cost, styled after the shipped statistics pills and opening the same kind
  *   of detail panel on click;
- * - a provider-card extension under Settings → Models showing the account
- *   quota, read from the Host's authenticated `/api/neuralwatt.quota` route.
+ * - a provider-card extension under Settings → Models that stores this route's
+ *   API key through the harness credential seam and shows the account quota.
  *
  * The pill renders nothing outside a session that used this route, so an
  * unaffected conversation shows no extra chrome.
@@ -32,11 +32,11 @@ window.__ModuleLoader__.load({
     const SETTINGS_NS = 'llm-neuralwatt'
     const QUOTA_PATH = '/api/neuralwatt.quota'
     const ROUTE = 'neuralwatt'
-    /** Text-presentation lightning: inherits the tertiary label tone instead of an emoji color. */
+    const DEFAULT_REF = 'NEURALWATT_API_KEY'
+    /** Text-presentation lightning: inherits the label tone instead of an emoji colour. */
     const BOLT = '\u26a1\ufe0e'
 
     const en = {
-      'usage.label': 'Neuralwatt energy',
       'usage.aria': 'Neuralwatt energy and billed cost for this session',
       'usage.title': 'Neuralwatt energy',
       'usage.energy': 'Energy',
@@ -52,10 +52,17 @@ window.__ModuleLoader__.load({
       'quota.plan': 'Plan',
       'quota.month': 'This month',
       'quota.unavailable': 'Quota unavailable',
-      'quota.nokey': 'Store an API key to read the account quota',
+      'key.label': 'API key',
+      'key.save': 'Save key',
+      'key.remove': 'Remove',
+      'key.hint': 'Stored through the harness credential store as',
+      'key.saved': 'API key saved.',
+      'key.removed': 'API key removed.',
+      'key.empty': 'Enter an API key before saving.',
+      'key.failed': 'Could not save the API key.',
+      'key.readonly': 'This credential store is read-only.',
     }
     const zh = {
-      'usage.label': 'Neuralwatt 能耗',
       'usage.aria': '本会话中 Neuralwatt 的能耗与计费成本',
       'usage.title': 'Neuralwatt 能耗',
       'usage.energy': '能耗',
@@ -71,7 +78,15 @@ window.__ModuleLoader__.load({
       'quota.plan': '套餐',
       'quota.month': '本月',
       'quota.unavailable': '配额不可用',
-      'quota.nokey': '存储 API 密钥后可读取账户配额',
+      'key.label': 'API 密钥',
+      'key.save': '保存密钥',
+      'key.remove': '移除',
+      'key.hint': '通过 Harness 凭据库存储为',
+      'key.saved': 'API 密钥已保存。',
+      'key.removed': 'API 密钥已移除。',
+      'key.empty': '请先输入 API 密钥。',
+      'key.failed': '无法保存 API 密钥。',
+      'key.readonly': '此凭据库为只读。',
     }
 
     /** Joules in the same unit ladder the Host report uses. */
@@ -136,16 +151,16 @@ window.__ModuleLoader__.load({
     const labelStyle = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }
     const sepStyle = { color: 'var(--dsw-alias-separator-primary)', margin: '0 6px' }
 
-    /** Subdued glyph: text presentation first, desaturated if the emoji font wins. */
+    /** A slightly brighter, slightly larger reading glyph; muted if the emoji font wins. */
     function Bolt() {
       return h('span', {
         'aria-hidden': true,
         style: {
-          fontSize: '13px',
+          fontSize: '15px',
           lineHeight: 1,
-          filter: 'grayscale(1)',
-          opacity: 0.85,
           flex: 'none',
+          color: 'var(--dsw-alias-label-secondary)',
+          filter: 'saturate(0.8)',
         },
       }, BOLT)
     }
@@ -319,72 +334,233 @@ window.__ModuleLoader__.load({
       open ? body : null)
     }
 
-    /** Provider-card extension: account quota for the Neuralwatt route. */
-    function QuotaCard({ configured, keyConfigured, t }) {
-      const tr = typeof t === 'function' ? t : key => key
-      const [snapshot, setSnapshot] = React.useState({ kind: 'idle' })
-      React.useEffect(() => {
-        if (configured !== true) {
-          setSnapshot({ kind: 'idle' })
-          return undefined
-        }
-        if (keyConfigured !== true) {
-          setSnapshot({ kind: 'nokey' })
-          return undefined
-        }
-        const controller = new AbortController()
-        setSnapshot({ kind: 'loading' })
-        fetch(QUOTA_PATH, {
-          headers: { accept: 'application/json' },
-          signal: controller.signal,
-          credentials: 'same-origin',
-        })
-          .then(response => response.json())
-          .then((body) => {
-            if (controller.signal.aborted) return
-            if (body !== null && body.configured === true && body.quota !== null && body.quota !== undefined) {
-              setSnapshot({ kind: 'ready', quota: body.quota })
-            } else {
-              setSnapshot({ kind: 'unavailable' })
-            }
-          })
-          .catch(() => {
-            if (!controller.signal.aborted) setSnapshot({ kind: 'unavailable' })
-          })
-        return () => controller.abort()
-      }, [configured, keyConfigured])
+    // Copied from the Models page's own field and button styling
+    // (ModelsSection.module.css) so the card's key editor belongs on the page.
+    const inputStyle = {
+      boxSizing: 'border-box',
+      flex: '1 1 auto',
+      minWidth: 0,
+      height: '32px',
+      padding: '0 10px',
+      border: '0.5px solid var(--dsw-alias-border-l4)',
+      borderRadius: 'var(--dsw-radius-md)',
+      font: 'inherit',
+      fontSize: '14px',
+      lineHeight: '22px',
+      background: 'var(--dsw-alias-bg-layer-1)',
+      color: 'var(--dsw-alias-label-primary)',
+    }
+    const cardButtonStyle = {
+      boxSizing: 'border-box',
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '4px',
+      height: '32px',
+      padding: '0 12px',
+      border: '0.5px solid var(--dsw-alias-border-l3)',
+      borderRadius: 'var(--dsw-radius-md)',
+      background: 'transparent',
+      color: 'var(--dsw-alias-label-primary)',
+      font: 'inherit',
+      fontSize: '13px',
+      lineHeight: '22px',
+      cursor: 'pointer',
+    }
+    const cardDangerStyle = { ...cardButtonStyle, border: 'none', color: 'var(--dsw-alias-state-error-primary)', padding: '0 8px' }
+    const cardRowStyle = { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }
+    const cardTextStyle = {
+      fontSize: 'var(--dsh-content-font-size-secondary, 13px)',
+      lineHeight: '18px',
+      color: 'var(--dsw-alias-label-tertiary)',
+    }
+    const cardLabelStyle = { ...cardTextStyle, color: 'var(--dsw-alias-label-secondary)' }
+    const keyBlockStyle = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '6px',
+      marginTop: '10px',
+      paddingTop: '10px',
+      borderTop: '0.5px solid var(--dsw-alias-border-l2)',
+    }
 
-      if (snapshot.kind === 'idle') return null
-      const style = {
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '2px',
-        fontSize: 'var(--dsh-content-font-size-secondary, 13px)',
-        lineHeight: '18px',
-        color: 'var(--dsw-alias-label-tertiary)',
+    /**
+     * Provider-card extension under Settings → Models: the account quota and
+     * the route's API key. The key is written through `remote.credentials`, the
+     * same seam the first-party cards use, and never enters configuration.
+     */
+    function makeQuotaCard(credentials) {
+      return function NeuralwattCard({ configured, keyConfigured, t }) {
+        const tr = typeof t === 'function' ? t : key => key
+        const [quota, setQuota] = React.useState(null)
+        const [quotaState, setQuotaState] = React.useState('idle')
+        const [ref, setRef] = React.useState(DEFAULT_REF)
+        const [info, setInfo] = React.useState(null)
+        const [draft, setDraft] = React.useState('')
+        const [busy, setBusy] = React.useState(false)
+        const [notice, setNotice] = React.useState(null)
+        const [generation, setGeneration] = React.useState(0)
+
+        React.useEffect(() => {
+          if (configured !== true) {
+            setQuotaState('idle')
+            return undefined
+          }
+          const controller = new AbortController()
+          let cancelled = false
+          setQuotaState(previous => previous === 'ready' ? previous : 'loading')
+          fetch(QUOTA_PATH, {
+            headers: { accept: 'application/json' },
+            signal: controller.signal,
+            credentials: 'same-origin',
+          })
+            .then(response => response.json())
+            .then((body) => {
+              if (cancelled) return undefined
+              const nextRef = body !== null && typeof body === 'object'
+                && typeof body.apiKeyEnv === 'string' && body.apiKeyEnv.length > 0
+                ? body.apiKeyEnv
+                : DEFAULT_REF
+              setRef(nextRef)
+              const nextQuota = body !== null && typeof body === 'object' ? body.quota : null
+              setQuota(nextQuota ?? null)
+              setQuotaState(nextQuota ? 'ready' : 'unavailable')
+              return credentials.describe([nextRef])
+                .then((result) => {
+                  if (!cancelled && result !== null && result !== undefined && result.ok === true) {
+                    setInfo(result.value[nextRef] ?? null)
+                  }
+                })
+                .catch(() => undefined)
+            })
+            .catch(() => {
+              if (!cancelled) setQuotaState('unavailable')
+            })
+          return () => {
+            cancelled = true
+            controller.abort()
+          }
+        }, [configured, generation])
+
+        const stored = info !== null && info !== undefined ? info.configured === true : keyConfigured === true
+        const writable = info === null || info === undefined || info.writable !== false
+
+        const save = async () => {
+          const value = draft.trim()
+          if (value.length === 0) {
+            setNotice({ kind: 'empty' })
+            return
+          }
+          setBusy(true)
+          setNotice(null)
+          try {
+            const result = await credentials.set(ref, value)
+            if (result === null || result === undefined || result.ok !== true) {
+              setNotice({ kind: 'error', message: result !== null && result !== undefined && result.error !== undefined ? result.error.message : undefined })
+              return
+            }
+            setDraft('')
+            setNotice({ kind: 'saved' })
+            setGeneration(value => value + 1)
+          } catch (error) {
+            setNotice({ kind: 'error', message: error instanceof Error ? error.message : undefined })
+          } finally {
+            setBusy(false)
+          }
+        }
+
+        const remove = async () => {
+          setBusy(true)
+          setNotice(null)
+          try {
+            const result = await credentials.unset(ref)
+            if (result === null || result === undefined || result.ok !== true) {
+              setNotice({ kind: 'error', message: result !== null && result !== undefined && result.error !== undefined ? result.error.message : undefined })
+              return
+            }
+            setDraft('')
+            setNotice({ kind: 'removed' })
+            setGeneration(value => value + 1)
+          } catch (error) {
+            setNotice({ kind: 'error', message: error instanceof Error ? error.message : undefined })
+          } finally {
+            setBusy(false)
+          }
+        }
+
+        if (configured !== true) return null
+
+        const quotaRows = []
+        if (quotaState === 'ready' && quota !== null && quota !== undefined) {
+          const subscription = quota.subscription
+          const balance = quota.balance
+          const month = quota.usage === undefined || quota.usage === null ? undefined : quota.usage.current_month
+          if (subscription !== null && subscription !== undefined) {
+            quotaRows.push(`${tr('quota.plan')}: ${subscription.plan ?? '\u2014'} (${subscription.status ?? '\u2014'})`)
+          }
+          if (balance !== undefined && balance !== null && typeof balance.credits_remaining_usd === 'number') {
+            quotaRows.push(`${tr('quota.remaining')}: ${formatUsd(balance.credits_remaining_usd)}`)
+          }
+          if (month !== undefined && month !== null) {
+            quotaRows.push(`${tr('quota.month')}: ${formatUsd(month.cost_usd ?? 0)} \u00b7 ${month.requests ?? 0} req \u00b7 ${((month.energy_kwh ?? 0)).toFixed(3)} kWh`)
+          }
+        }
+        if (quotaRows.length === 0) quotaRows.push(tr('quota.unavailable'))
+
+        const noticeText = notice === null
+          ? `${tr('key.hint')} ${ref}`
+          : notice.kind === 'saved'
+            ? tr('key.saved')
+            : notice.kind === 'removed'
+              ? tr('key.removed')
+              : notice.kind === 'empty'
+                ? tr('key.empty')
+                : (notice.message !== undefined && notice.message.length > 0 ? notice.message : tr('key.failed'))
+
+        const placeholder = !writable
+          ? tr('key.readonly')
+          : stored
+            ? (info !== null && info !== undefined && typeof info.masked === 'string' && info.masked.length > 0 ? info.masked : '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022')
+            : ref
+
+        return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' }, 'data-neuralwatt-card': quotaState },
+          ...quotaRows.map((line, index) => h('span', { key: `q-${index}`, style: cardTextStyle }, line)),
+          h('div', { style: keyBlockStyle },
+            h('span', { style: cardLabelStyle }, tr('key.label')),
+            h('div', { style: cardRowStyle },
+              h('input', {
+                type: 'password',
+                autoComplete: 'new-password',
+                value: draft,
+                placeholder,
+                disabled: busy || !writable,
+                'aria-label': tr('key.label'),
+                'data-neuralwatt-key': '',
+                style: inputStyle,
+                onChange: event => setDraft(event.target.value),
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    void save()
+                  }
+                },
+              }),
+              h('button', {
+                type: 'button',
+                style: cardButtonStyle,
+                disabled: busy || !writable || draft.trim().length === 0,
+                onClick: () => { void save() },
+              }, tr('key.save')),
+              stored
+                ? h('button', {
+                  type: 'button',
+                  style: cardDangerStyle,
+                  disabled: busy || !writable,
+                  onClick: () => { void remove() },
+                }, tr('key.remove'))
+                : null),
+            h('span', { style: cardTextStyle, 'aria-live': 'polite' }, noticeText)))
       }
-      if (snapshot.kind === 'nokey') return h('div', { style, 'data-neuralwatt-quota': 'nokey' }, tr('quota.nokey'))
-      if (snapshot.kind === 'loading') return h('div', { style, 'data-neuralwatt-quota': 'loading' }, '\u2026')
-      if (snapshot.kind === 'unavailable') {
-        return h('div', { style, 'data-neuralwatt-quota': 'unavailable' }, tr('quota.unavailable'))
-      }
-      const quota = snapshot.quota
-      const subscription = quota.subscription
-      const balance = quota.balance
-      const month = quota.usage === undefined || quota.usage === null ? undefined : quota.usage.current_month
-      const rows = []
-      if (subscription !== null && subscription !== undefined) {
-        rows.push(`${tr('quota.plan')}: ${subscription.plan ?? '\u2014'} (${subscription.status ?? '\u2014'})`)
-      }
-      if (balance !== undefined && balance !== null && typeof balance.credits_remaining_usd === 'number') {
-        rows.push(`${tr('quota.remaining')}: ${formatUsd(balance.credits_remaining_usd)}`)
-      }
-      if (month !== undefined && month !== null) {
-        rows.push(`${tr('quota.month')}: ${formatUsd(month.cost_usd ?? 0)} \u00b7 ${month.requests ?? 0} req \u00b7 ${((month.energy_kwh ?? 0)).toFixed(3)} kWh`)
-      }
-      if (rows.length === 0) rows.push(tr('quota.unavailable'))
-      return h('div', { style, 'data-neuralwatt-quota': 'ready' },
-        ...rows.map((line, index) => h('span', { key: String(index) }, line)))
     }
 
     return {
@@ -400,14 +576,22 @@ window.__ModuleLoader__.load({
           order: 6,
           locale: NS,
         }, UsagePill))
-        // The Models page exposes one extension area per provider family,
-        // keyed by the row's settings namespace.
-        ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
-          name: 'settings.models.provider-card',
-          key: SETTINGS_NS,
-          id: 'neuralwatt-quota',
-          locale: NS,
-        }, QuotaCard))
+        // The card writes the key through the generated credentials Remote, so
+        // it activates only where the Web remotes assembly is mounted.
+        ctx.inject(['remote.credentials'], (child) => {
+          // Resolve the generated credentials Remote by service key: the dotted
+          // namespace proxy and the registry key are two faces of one service.
+          const credentials = typeof child.get === 'function'
+            ? (child.get('remote.credentials') ?? (child.remote === undefined ? undefined : child.remote.credentials))
+            : (child.remote === undefined ? undefined : child.remote.credentials)
+          if (credentials === undefined) return
+          child.slots.inject('settings.models.provider-card', () => child.slots.register({
+            name: 'settings.models.provider-card',
+            key: SETTINGS_NS,
+            id: 'neuralwatt-quota',
+            locale: NS,
+          }, makeQuotaCard(credentials)))
+        })
       },
     }
   },

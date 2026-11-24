@@ -179,7 +179,7 @@ export function apply(ctx: Context, config: Config): void {
         try {
           const key = await resolveApiKey(ctx, live.apiKeyEnv)
           const quota = await fetchQuota(live, key)
-          return Response.json({ configured: true, route: ROUTE, quota: quota ?? null }, {
+          return Response.json({ configured: true, route: ROUTE, apiKeyEnv: live.apiKeyEnv, quota: quota ?? null }, {
             status: 200,
             headers: { 'cache-control': 'no-store' },
           })
@@ -187,6 +187,7 @@ export function apply(ctx: Context, config: Config): void {
           return Response.json({
             configured: false,
             route: ROUTE,
+            apiKeyEnv: live.apiKeyEnv,
             error: error instanceof Error ? error.message : 'quota unavailable',
           }, { status: 200, headers: { 'cache-control': 'no-store' } })
         }

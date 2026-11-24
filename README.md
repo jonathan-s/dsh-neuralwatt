@@ -8,18 +8,20 @@ This is a port of [`monotykamary/pi-neuralwatt-provider`](https://github.com/mon
 
 ## Contents
 
-- [What the bundle contributes](#what-the-bundle-contributes)
-- [Install](#install)
-- [Reload after a change](#reload-after-a-change)
-- [Authenticate](#authenticate)
-- [Select a model](#select-a-model)
-- [Configure](#configure)
-- [Energy, cost and quota](#energy-cost-and-quota)
-- [How it works](#how-it-works)
-- [Develop](#develop)
-- [Model catalog sync](#model-catalog-sync)
-- [Known limits](#known-limits)
-- [Attribution](#attribution)
+- [dsh-neuralwatt-provider](#dsh-neuralwatt-provider)
+  - [Contents](#contents)
+  - [What the bundle contributes](#what-the-bundle-contributes)
+  - [Install](#install)
+  - [Reload after a change](#reload-after-a-change)
+  - [Authenticate](#authenticate)
+  - [Select a model](#select-a-model)
+  - [Configure](#configure)
+  - [Energy, cost and quota](#energy-cost-and-quota)
+  - [How it works](#how-it-works)
+  - [Develop](#develop)
+  - [Model catalog sync](#model-catalog-sync)
+  - [Known limits](#known-limits)
+  - [Attribution](#attribution)
 
 ## What the bundle contributes
 
@@ -34,7 +36,7 @@ This is a port of [`monotykamary/pi-neuralwatt-provider`](https://github.com/mon
 | Durable telemetry | Energy, billed cost, and flex queue wait in the assistant message's replay state |
 | Session projection | `neuralwattUsage`: per-session requests, tokens, cached tokens, energy, cost, last queue wait |
 | Composer pill | Energy and billed cost for this session, in the shipped tertiary tone, with a click-open energy detail panel |
-| Provider card | Account quota in Settings → Models, served by `/api/neuralwatt.quota` |
+| Provider card | API-key entry and account quota in Settings → Models, served by `/api/neuralwatt.quota` |
 | `neuralwatt_status` tool | Session usage plus account quota, offered only to steps routed to this provider |
 
 ## Install
@@ -88,6 +90,8 @@ A failed replacement is reported as an activation failure and the previous code 
 ## Authenticate
 
 The key never belongs in configuration. Resolution order is the credentials service, then — only when no credentials service is mounted — the launch environment (process environment, project `.env`, `$DSH_HOME/.env`). A miss fails with `MISSING_CREDENTIAL` naming the reference.
+
+The simplest path is **Settings → Models → Neuralwatt**: its card stores the key through the credential seam under the configured `apiKeyEnv` reference and shows whether it is configured. The command line is equivalent:
 
 ```bash
 # Simplest for the Desktop app: the launcher reads $DSH_HOME/.env
@@ -225,7 +229,7 @@ The projector drops classifiers, strips the `neuralwatt/` prefix from MCR ids, a
 
 ## Known limits
 
-- **Models page editing.** The route appears in the configurable-provider directory with its own card extension, but the shipped Models editor has hand-written forms only for the first-party families, so Neuralwatt fields are edited in the profile patch (or the Settings/Config surface) rather than in that form.
+- **Models page editing.** The route appears in the configurable-provider directory with its own card extension, which carries the API-key field and the account quota. The shipped Models editor has hand-written forms only for the first-party families, so the remaining Neuralwatt fields are edited in the profile patch (or the Settings/Config surface) rather than in that form.
 - **Classifiers.** Upstream exposes Clef Flash and mammoth-1 through pi's classifier registry. DSH has no equivalent seam here, so they are filtered out rather than shown as chat models that would fail.
 - **Model discovery is on demand.** The catalog is checked in; the Models page's "fetch available models" action asks `GET /models` (or the shipped catalog for this route), but nothing refreshes the list in the background.
 - **Image token pricing.** Neuralwatt publishes no visual-token formula, so the adapter declares the request-image projection it sends and lets the harness's neutral estimate price image input. It does not declare a provider price.

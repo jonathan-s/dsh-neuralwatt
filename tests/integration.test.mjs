@@ -321,6 +321,7 @@ test('quota route answers the provider card with a snapshot', async () => {
     assert.equal(response.status, 200)
     const payload = await response.json()
     assert.equal(payload.configured, true)
+    assert.equal(payload.apiKeyEnv, 'NEURALWATT_API_KEY')
     assert.equal(payload.quota.subscription.plan, 'pro')
   } finally {
     await server.close()
