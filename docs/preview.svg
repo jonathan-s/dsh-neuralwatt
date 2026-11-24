@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="300" viewBox="0 0 640 300" role="img" aria-label="A session usage pill beside an account quota card, connected by a telemetry trace">
+  <defs>
+    <linearGradient id="nwPreviewBolt" x1="150" y1="112" x2="186" y2="188" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5b8cf0"/>
+      <stop offset="1" stop-color="#3f6bd8"/>
+    </linearGradient>
+  </defs>
+  <!-- session usage pill -->
+  <rect x="72" y="112" width="184" height="56" rx="28" fill="none" stroke="#5b8cf0" stroke-width="2.5" opacity="0.55"/>
+  <path d="M162 124 146 149a1.4 1.4 0 0 0 1.1 2.4h7l-3.1 11.2a1.4 1.4 0 0 0 2.5 1.3l16.9-21.1a1.4 1.4 0 0 0-1.1-2.4h-7.3l3.6-10.9a1.4 1.4 0 0 0-2.6-1.5z" fill="url(#nwPreviewBolt)"/>
+  <rect x="186" y="132" width="44" height="6" rx="3" fill="#5b8cf0" opacity="0.8"/>
+  <rect x="186" y="146" width="28" height="6" rx="3" fill="#8a94a6" opacity="0.75"/>
+  <!-- telemetry trace -->
+  <path d="M268 140h64a16 16 0 0 1 16 16v0a16 16 0 0 1-16 16h-24" fill="none" stroke="#8a94a6" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="7 8" opacity="0.7"/>
+  <circle cx="300" cy="140" r="4.5" fill="#f0a93b"/>
+  <!-- account quota card -->
+  <rect x="336" y="96" width="232" height="120" rx="14" fill="none" stroke="#8a94a6" stroke-width="2.5" opacity="0.6"/>
+  <circle cx="364" cy="126" r="7" fill="#f0a93b"/>
+  <rect x="382" y="121" width="96" height="9" rx="4.5" fill="#5b8cf0" opacity="0.85"/>
+  <rect x="360" y="152" width="184" height="7" rx="3.5" fill="#8a94a6" opacity="0.7"/>
+  <rect x="360" y="170" width="136" height="7" rx="3.5" fill="#8a94a6" opacity="0.55"/>
+  <rect x="360" y="188" width="164" height="7" rx="3.5" fill="#8a94a6" opacity="0.4"/>
+</svg>

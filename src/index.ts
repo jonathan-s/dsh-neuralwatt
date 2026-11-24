@@ -2,183 +2,207 @@
  * Neuralwatt provider plugin for DeepSeek Harness.
  *
  * Registers the `neuralwatt` LLM route over the OpenAI-compatible Chat
- * Completions endpoint, exposes the ported model catalog to the picker, and
- * reports energy, billed cost, and account quota through a model-facing tool.
+ * Completions endpoint, advertises the ported model catalog to selectors and
+ * discovery, folds Neuralwatt's energy telemetry into a durable per-session
+ * projection, and reports session usage plus account quota through a
+ * model-facing tool and a provider-card route.
+ *
+ * Every capability beyond the route itself is optional: the plugin mounts on
+ * `llm` alone, and contributes tools, discovery, telemetry, and the Web card
+ * only where the composition provides their services.
  *
  * @module dsh-neuralwatt-provider
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { assertUsableApiKey } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import z from '@deepseek-ai/schemastery'
 import { NeuralwattAdapter } from './adapter.js'
 import { Catalog } from './catalog.js'
-import { captureComment, captureQueue, createTelemetry, formatEnergy } from './energy.js'
-import { BlockBuilder, mapFinish, mapUsage, parseSse, providerError, serialize } from './wire.js'
+import { resolveApiKey } from './credentials.js'
+import { discoverModels } from './discovery.js'
+import { formatEnergy } from './energy.js'
+import {
+  BASE_URL_ENV,
+  DEFAULT_API_KEY_ENV,
+  DEFAULT_BASE_URL,
+  Config,
+  registrationFacts,
+  resolveOptions,
+} from './options.js'
+import type { ResolvedOptions } from './options.js'
+import { PROJECTION_KEY, applyUsage, usageProjectionDefinition } from './projection.js'
+import type { NeuralwattUsageView } from './projection.js'
+import { fetchQuota, quotaReport } from './quota.js'
+import { QUOTA_PATH, ROUTE, SETTINGS_NAMESPACE_FALLBACK } from './routes.js'
+import { resolveRequestImageTarget } from './images.js'
+import { parseModelListing } from './discovery.js'
+import { quotaReport as renderQuotaReport } from './quota.js'
+import { readTelemetry, replayEnvelope } from './replay.js'
+import {
+  BlockBuilder,
+  mapFinish,
+  mapUsage,
+  parseSse,
+  providerError,
+  serialize,
+} from './wire.js'
+import { captureComment, captureQueue, createTelemetry } from './energy.js'
 
-/** Provider route this plugin owns. */
-export const ROUTE = 'neuralwatt'
-
-/** Plugin configuration. */
-export interface Config {
-  /** API root of the OpenAI-compatible endpoint. */
-  baseURL: string
-  /** Credential reference resolved through the credentials seam, then the launch environment. */
-  apiKeyEnv: string
-  /** Literal API key fallback; prefer `apiKeyEnv` so no secret enters configuration. */
-  apiKey?: string
-  /** Label shown by model selectors and provider diagnostics. */
-  displayName: string
-  /** Whether Neuralwatt's hosted tools stay available to the model. */
-  hostedTools: boolean
-  /** Log per-request energy, cost, and flex queue telemetry at debug level. */
-  logEnergy: boolean
-  /** Overall request deadline in milliseconds. */
-  timeoutMs: number
-}
-
-/** Schemastery configuration schema. */
-export const Config: z<Config> = z.object({
-  baseURL: z.string().default('https://api.neuralwatt.com/v1')
-    .description('API root of the OpenAI-compatible endpoint.'),
-  apiKeyEnv: z.string().default('NEURALWATT_API_KEY')
-    .description('Credential reference resolved per request; also the environment variable fallback.'),
-  apiKey: z.string()
-    .description('Literal API key fallback. Prefer apiKeyEnv, or put NEURALWATT_API_KEY in $DSH_HOME/.env.'),
-  displayName: z.string().default('Neuralwatt')
-    .description('Label shown by model selectors.'),
-  hostedTools: z.boolean().default(true)
-    .description('Leave Neuralwatt hosted tools available; false sends X-NW-Tools-Opt-Out.'),
-  logEnergy: z.boolean().default(false)
-    .description('Log per-request energy, billed cost, and flex queue telemetry at debug level.'),
-  timeoutMs: z.number().default(900_000)
-    .description('Overall request deadline in milliseconds.'),
-})
+export { Config } from './options.js'
+export { ROUTE } from './routes.js'
+export { PROJECTION_KEY, usageProjectionDefinition } from './projection.js'
 
 export const name = 'llm-neuralwatt'
 export const inject = ['llm']
 
-/** Subset of the quota endpoint this plugin reports. */
-interface QuotaResponse {
-  balance?: { credits_remaining_usd?: number; credits_used_usd?: number }
-  usage?: {
-    lifetime?: { cost_usd?: number; requests?: number; tokens?: number; energy_kwh?: number }
-    current_month?: { cost_usd?: number; requests?: number; tokens?: number; energy_kwh?: number }
-  }
-  subscription?: {
-    plan?: string
-    status?: string
-    kwh_included?: number | null
-    kwh_used?: number | null
-    kwh_remaining?: number | null
-  } | null
+/** Structural face of the session-projection registry, which is optional. */
+interface ProjectionRegistry {
+  register(definition: unknown): Promise<{ stateOf(session: unknown): unknown }>
 }
 
-/**
- * Resolve the API key for one request.
- * @param ctx - plugin context.
- * @param config - resolved plugin configuration.
- * @returns the usable key.
- */
-async function resolveApiKey(ctx: Context, config: Config): Promise<string> {
-  const ref = credentialRef(config.apiKeyEnv)
-  const credentials = ctx.get('credentials') as { resolve: (ref: CredentialRef) => Promise<{ value: string } | undefined> } | undefined
-  const stored = credentials === undefined ? undefined : await credentials.resolve(ref)
-  const candidate = stored?.value
-    ?? launchEnvironmentOf(ctx).get(config.apiKeyEnv)?.value
-    ?? (typeof process.env[config.apiKeyEnv] === 'string' ? process.env[config.apiKeyEnv] : undefined)
-    ?? config.apiKey
-  if (candidate === undefined || candidate.length === 0) {
-    throw new Error(
-      `llm-neuralwatt: no credential for the ${ROUTE} route. Put ${config.apiKeyEnv}=… in $DSH_HOME/.env, `
-      + `export ${config.apiKeyEnv}, or store it through the credentials service.`,
-    )
-  }
-  return assertUsableApiKey(candidate, 'llm-neuralwatt', config.apiKeyEnv)
+/** Structural face of the exact-path Fetch route registry, which is optional. */
+interface FetchRegistry {
+  register(route: {
+    readonly path: string
+    readonly methods: readonly ('GET' | 'HEAD')[]
+    readonly requestBody: 'buffered'
+    readonly fetch: (request: Request) => Promise<Response>
+  }): () => Promise<void>
 }
 
-/**
- * Fetch account quota, tolerating every failure: the report is cosmetic.
- * @param config - resolved configuration.
- * @param key - API key for this lookup.
- * @returns the parsed quota, or `undefined`.
- */
-async function fetchQuota(config: Config, key: string): Promise<QuotaResponse | undefined> {
-  try {
-    const response = await fetch(`${config.baseURL.replace(/\/+$/, '')}/quota`, {
-      headers: { authorization: `Bearer ${key}` },
-      signal: AbortSignal.timeout(8_000),
-    })
-    if (!response.ok) return undefined
-    return await response.json() as QuotaResponse
-  } catch (_quotaUnavailable) {
-    return undefined
+/** Structural face of the configurable-provider directory service. */
+interface DirectoryRegistry {
+  replace(entries: readonly unknown[]): void
+}
+
+/** Read one configurable-provider entry for this route. */
+function directoryEntry(options: ResolvedOptions, settingsNs: string) {
+  return {
+    provider: ROUTE,
+    displayName: options.displayName,
+    settingsNs,
+    settingsPath: [] as string[],
+    defaultBaseURL: DEFAULT_BASE_URL,
+    baseURLEnv: [BASE_URL_ENV],
+    nativeAuth: { env: [DEFAULT_API_KEY_ENV], oauth: false },
   }
 }
 
-/** Compact human-readable report of quota and process telemetry. */
-function quotaReport(quota: QuotaResponse | undefined): string[] {
-  if (quota === undefined) return ['Account quota: unavailable (check the API key or network).']
-  const lines: string[] = []
-  if (quota.subscription !== null && quota.subscription !== undefined) {
-    const plan = quota.subscription.plan ?? 'unknown plan'
-    const status = quota.subscription.status ?? 'unknown status'
-    lines.push(`Subscription: ${plan} (${status})`)
-    if (typeof quota.subscription.kwh_included === 'number') {
-      lines.push(`Plan energy: ${quota.subscription.kwh_used ?? 0} / ${quota.subscription.kwh_included} kWh used`
-        + ` (${quota.subscription.kwh_remaining ?? 0} kWh remaining)`)
-    }
-  }
-  if (typeof quota.balance?.credits_remaining_usd === 'number') {
-    lines.push(`Credits remaining: $${quota.balance.credits_remaining_usd.toFixed(2)}`)
-  }
-  if (quota.usage?.current_month !== undefined) {
-    const month = quota.usage.current_month
-    lines.push(`This month: $${(month.cost_usd ?? 0).toFixed(2)}, ${month.requests ?? 0} requests,`
-      + ` ${(month.tokens ?? 0).toLocaleString('en-US')} tokens, ${(month.energy_kwh ?? 0).toFixed(3)} kWh`)
-  }
-  if (quota.usage?.lifetime !== undefined) {
-    const lifetime = quota.usage.lifetime
-    lines.push(`Lifetime: $${(lifetime.cost_usd ?? 0).toFixed(2)}, ${lifetime.requests ?? 0} requests,`
-      + ` ${(lifetime.energy_kwh ?? 0).toFixed(3)} kWh`)
-  }
-  return lines
+/** Resolve this plugin's settings namespace: its loader entry id. */
+function settingsNamespaceOf(ctx: Context): string {
+  const fiber = (ctx as unknown as { fiber?: { entry?: { options?: { id?: string } } } }).fiber
+  const id = fiber?.entry?.options?.id
+  return typeof id === 'string' && id.length > 0 ? id : SETTINGS_NAMESPACE_FALLBACK
 }
 
 /**
  * Mount the route.
  * @param ctx - plugin context.
- * @param config - resolved configuration.
+ * @param config - resolved plugin configuration; every field is a live reference.
  */
 export function apply(ctx: Context, config: Config): void {
+  const settingsNs = settingsNamespaceOf(ctx)
+  const options = (): ResolvedOptions => resolveOptions(config, launchEnvironmentOf(ctx))
   const catalog = new Catalog()
   const adapter = new NeuralwattAdapter({
-    displayName: config.displayName,
-    baseURL: config.baseURL,
+    options,
     catalog,
-    timeoutMs: config.timeoutMs,
-    hostedTools: config.hostedTools,
-    logEnergy: config.logEnergy,
-    resolveApiKey: signal => resolveApiKey(ctx, config),
+    resolveApiKey: () => resolveApiKey(ctx, options().apiKeyEnv),
     attachments: () => ctx.get('attachments') as AttachmentStore | undefined,
     logger: {
       debug: message => ctx.logger.debug(message),
       warn: message => ctx.logger.warn(message),
     },
   })
-  ctx.llm.registerAdapter([ROUTE], adapter)
-  ctx.logger.warn(`llm-neuralwatt: mounted ${catalog.list(ROUTE).length} models at ${config.baseURL}`)
+  const registration = ctx.llm.registerAdapter([ROUTE], adapter)
+  ctx.logger.debug(`llm-neuralwatt: mounted ${catalog.list(ROUTE).length} models at ${options().baseURL}`)
 
+  // The configuration surface's directory entry: the route is discoverable, its
+  // endpoint and credential variable are known, and it carries the Settings
+  // namespace its volatile fields live in.
+  const directory = ctx.llm.registerConfigurableProviders([directoryEntry(options(), settingsNs)]) as DirectoryRegistry
+  ctx.llm.registerModelDiscovery(
+    settingsNs,
+    (request, signal) => discoverModels(signal === undefined ? request : { ...request, signal }, catalog),
+  )
+
+  // The registry captures the display name and retry policy at registration, so
+  // a change to either re-registers the route; everything else is read per
+  // request and needs no re-registration.
+  let facts = registrationFacts(options())
+  let directoryFacts = JSON.stringify(directoryEntry(options(), settingsNs))
+  ctx.on('loader/volatile-update', () => {
+    try {
+      const next = options()
+      const entry = directoryEntry(next, settingsNs)
+      if (registrationFacts(next) !== facts) {
+        registration.replace([ROUTE])
+        facts = registrationFacts(next)
+      }
+      const nextDirectory = JSON.stringify(entry)
+      if (nextDirectory !== directoryFacts) {
+        directory.replace([entry])
+        directoryFacts = nextDirectory
+      }
+    } catch (error) {
+      ctx.logger.warn('llm-neuralwatt: configuration update was refused; the previous settings stay active')
+      ctx.logger.warn(error)
+    }
+  })
+
+  // Per-session usage folded from the durable log, published to every client
+  // carrier through the projection's wire view.
+  let usageOf: ((session: unknown) => NeuralwattUsageView | undefined) | undefined
+  ctx.inject(['sessionProjections'], (child) => {
+    const registry = (child as unknown as { sessionProjections: ProjectionRegistry }).sessionProjections
+    void registry.register(usageProjectionDefinition).then((handle) => {
+      usageOf = session => handle.stateOf(session) as NeuralwattUsageView | undefined
+    }).catch((error: unknown) => {
+      child.logger.warn('llm-neuralwatt: session usage projection was refused')
+      child.logger.warn(error)
+    })
+  })
+
+  // Account quota for the Web provider card. The route joins the browser's
+  // authenticated exact-path Fetch registry; without a Web carrier it is absent.
+  ctx.inject(['connection'], (child) => {
+    const fetchRoutes = (child as unknown as { connection: { fetch: FetchRegistry } }).connection.fetch
+    void fetchRoutes.register({
+      path: QUOTA_PATH,
+      methods: ['GET', 'HEAD'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        if (request.method === 'HEAD') return new Response(null, { status: 200, headers: { 'content-type': 'application/json' } })
+        const live = options()
+        try {
+          const key = await resolveApiKey(ctx, live.apiKeyEnv)
+          const quota = await fetchQuota(live, key)
+          return Response.json({ configured: true, route: ROUTE, quota: quota ?? null }, {
+            status: 200,
+            headers: { 'cache-control': 'no-store' },
+          })
+        } catch (error) {
+          return Response.json({
+            configured: false,
+            route: ROUTE,
+            error: error instanceof Error ? error.message : 'quota unavailable',
+          }, { status: 200, headers: { 'cache-control': 'no-store' } })
+        }
+      },
+    })
+  })
+
+  // The model-facing status tool exists only for a step that routes to this
+  // provider, so an unrelated session is not offered a Neuralwatt tool.
   ctx.inject(['tools'], (child) => {
     child.tools.register(defineTool({
       name: 'neuralwatt_status',
       description:
-        'Report Neuralwatt account quota (plan, credits, energy) and this process\'s token, energy, and billed-cost '
-        + 'totals. Use it when the user asks about spend, energy use, or remaining credits for the Neuralwatt route.',
+        'Report Neuralwatt usage for this session (requests, tokens, energy, billed cost, last flex queue wait) and the '
+        + 'account quota (plan, credits, monthly and lifetime spend). Use it when the user asks about spend, energy use, '
+        + 'or remaining credits for the Neuralwatt route.',
       parameters: {},
       output: {
         schema: {
@@ -188,26 +212,33 @@ export function apply(ctx: Context, config: Config): void {
         },
         render: (_args: unknown, value: { report: string }) => [{ type: 'text' as const, text: value.report }],
       },
-      async execute() {
-        const stats = adapter.snapshot()
-        const lines = [
-          `Neuralwatt route (${config.baseURL})`,
-          `Requests this process: ${stats.requests} (${stats.failed} failed)`,
-          `Tokens this process: ${stats.inputTokens.toLocaleString('en-US')} in, ${stats.outputTokens.toLocaleString('en-US')} out`,
-          `Energy this process: ${formatEnergy(stats.energyJoules)}; billed $${stats.costUsd.toFixed(6)}`,
-          ...stats.lastQueueSeconds === undefined ? [] : [`Last flex queue wait: ${stats.lastQueueSeconds.toFixed(1)} s`],
-          '',
-        ]
-        let quota: QuotaResponse | undefined
-        try {
-          quota = await fetchQuota(config, await resolveApiKey(ctx, config))
-        } catch (_missingKey) {
-          lines.push('Account quota: unavailable (no API key resolved).')
+      async execute(_args, exec) {
+        const live = options()
+        const session = exec.agent?.session
+        const usage = session === undefined ? undefined : usageOf?.(session)
+        const lines = [`Neuralwatt route: ${live.baseURL}`]
+        if (usage === undefined || usage.requests === 0) {
+          lines.push('Session usage: no Neuralwatt response recorded in this session yet.')
+        } else {
+          lines.push(
+            `Session requests: ${usage.requests}`,
+            `Session tokens: ${usage.inputTokens.toLocaleString('en-US')} in, `
+            + `${usage.outputTokens.toLocaleString('en-US')} out`
+            + (usage.cacheReadTokens > 0 ? `, ${usage.cacheReadTokens.toLocaleString('en-US')} cached` : ''),
+            `Session energy: ${formatEnergy(usage.energyJoules)}; billed $${usage.costUsd.toFixed(6)}`,
+          )
+          if (usage.lastQueueSeconds !== undefined) lines.push(`Last flex queue wait: ${usage.lastQueueSeconds.toFixed(1)} s`)
         }
-        lines.push(...quotaReport(quota))
+        lines.push('')
+        try {
+          const key = await resolveApiKey(ctx, live.apiKeyEnv)
+          lines.push(...quotaReport(await fetchQuota(live, key, exec.signal)))
+        } catch (_missingKey) {
+          lines.push('Account quota: unavailable (no credential resolved).')
+        }
         return { report: lines.join('\n') }
       },
-    }))
+    }), { when: ({ modelSelection }) => modelSelection.provider === ROUTE })
   })
 }
 
@@ -229,4 +260,14 @@ export const __internals = {
   captureQueue,
   createTelemetry,
   formatEnergy,
+  resolveOptions,
+  registrationFacts,
+  applyUsage,
+  usageProjectionDefinition,
+  PROJECTION_KEY,
+  readTelemetry,
+  replayEnvelope,
+  resolveRequestImageTarget,
+  parseModelListing,
+  quotaReport: renderQuotaReport,
 } as const

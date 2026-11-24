@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Neuralwatt provider",
+    "description": "Routes Neuralwatt models through DeepSeek Harness with reasoning efforts, vision, tool calls, durable energy and billed-cost telemetry, a per-session usage pill, and account quota.",
+    "detail": "docs/DETAIL.md"
+  }
+}

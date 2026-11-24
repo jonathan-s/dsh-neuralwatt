@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Neuralwatt 提供方",
+    "description": "在 DeepSeek Harness 中接入 Neuralwatt 模型，支持推理等级、视觉输入、工具调用、可持久化的能耗与计费遥测、会话用量角标以及账户配额。",
+    "detail": "docs/DETAIL.md"
+  }
+}

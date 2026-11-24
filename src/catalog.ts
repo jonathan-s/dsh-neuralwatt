@@ -1,11 +1,13 @@
 /**
  * Neuralwatt model catalog: the checked-in projection of the upstream
  * pi-neuralwatt-provider catalogs plus the DSH-facing lookups an adapter owes
- * the LLM service (`listModels` and `resolveModel`).
+ * the LLM service (`listModels`, `resolveModel`, and catalog-backed discovery).
  *
  * @module dsh-neuralwatt-provider/catalog
  */
 import type {
+  LlmDiscoveredModel,
+  LlmModelBadge,
   LlmModelInfo,
   LlmResolvedModelInfo,
   ModelModality,
@@ -31,7 +33,7 @@ export interface CatalogCompat {
   requiresThinkingAsText?: boolean
 }
 
-/** Per-million-token list prices, kept for tool reporting. */
+/** Per-million-token list prices, kept for model descriptions. */
 export interface CatalogCost {
   input: number
   output: number
@@ -83,6 +85,37 @@ function effortId(id: string): ReasoningEffortId {
   return id as ReasoningEffortId
 }
 
+/** Compact context capacity for a selector description. */
+function contextLabel(tokens: number): string {
+  return tokens >= 1_000_000
+    ? `${Number((tokens / 1_000_000).toFixed(1))}M context`
+    : `${Math.round(tokens / 1_000)}K context`
+}
+
+/** Compact list price for a selector description. */
+function priceLabel(cost: CatalogCost): string {
+  const money = (value: number): string => `$${Number(value.toFixed(4))}`
+  return `${money(cost.input)}/M in · ${money(cost.output)}/M out`
+}
+
+/**
+ * One user-facing distinction shown beside the model name.
+ *
+ * A flex-tier model queues server-side and bills at a different rate, which is
+ * exactly the fact a user needs before selecting it; the tone stays neutral
+ * because a flex tier is a tradeoff, not a recommendation.
+ */
+function badgeOf(model: CatalogModel): LlmModelBadge | undefined {
+  return model.id.endsWith('-flex') ? { text: 'Flex', tone: 'neutral' } : undefined
+}
+
+/** One-line selector description: price when known, then context capacity. */
+function descriptionOf(model: CatalogModel): string {
+  const parts = model.cost === undefined ? [] : [priceLabel(model.cost)]
+  parts.push(contextLabel(model.contextWindow))
+  return parts.join(' · ')
+}
+
 /** Read-only catalog with the lookups one route's adapter needs. */
 export class Catalog {
   private readonly byId: Map<string, CatalogModel>
@@ -96,11 +129,30 @@ export class Catalog {
 
   /** Every model the route advertises, in display order. */
   list(provider: string): readonly LlmModelInfo[] {
+    return [...this.byId.values()].map((model) => {
+      const badge = badgeOf(model)
+      return {
+        provider,
+        id: model.id,
+        name: model.name,
+        description: descriptionOf(model),
+        inputModalities: model.input,
+        ...badge === undefined ? {} : { badge },
+      }
+    })
+  }
+
+  /**
+   * Model choices this catalog can answer for model discovery, with the
+   * capacities a listing endpoint does not disclose.
+   */
+  discover(_provider: string): readonly LlmDiscoveredModel[] {
     return [...this.byId.values()].map(model => ({
-      provider,
       id: model.id,
       name: model.name,
-      inputModalities: model.input,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      inputModalities: [...model.input],
     }))
   }
 
@@ -108,13 +160,20 @@ export class Catalog {
   resolve(provider: string, model: string): LlmResolvedModelInfo {
     const entry = this.byId.get(model)
     if (entry === undefined) return { provider, id: model, name: model }
+    const badge = badgeOf(entry)
     return {
       provider,
       id: entry.id,
       name: entry.name,
+      description: descriptionOf(entry),
       inputModalities: entry.input,
       context: { contextWindow: entry.contextWindow },
       defaultMaxTokens: entry.maxTokens,
+      // OpenAI-compatible Chat Completions reads the latest system message at any
+      // position as the effective prompt, so a changed prompt can follow cached
+      // history instead of rewriting message 0.
+      systemPromptUpdate: 'in-history',
+      ...badge === undefined ? {} : { badge },
       ...entry.efforts === undefined
         ? {}
         : {

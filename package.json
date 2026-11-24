@@ -1,12 +1,16 @@
 {
   "name": "dsh-neuralwatt-provider",
-  "version": "0.1.0",
-  "description": "Neuralwatt provider for DeepSeek Harness: Kimi, GLM, Qwen, DeepSeek and MiniMax models with energy and cost telemetry",
+  "version": "0.2.0",
+  "description": "Neuralwatt provider for DeepSeek Harness: Kimi, GLM, Qwen, DeepSeek and MiniMax models with durable energy and cost telemetry",
   "type": "module",
   "main": "lib/index.js",
   "files": [
     "lib/index.js",
+    "client.js",
     "cordis.patch.yml",
+    "locale/*.json",
+    "docs",
+    "icon.svg",
     "README.md"
   ],
   "license": "MIT",
@@ -24,32 +28,27 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "scripts": {
     "build": "node scripts/build.mjs",
     "sync-catalog": "node scripts/sync-catalog.mjs",
+    "pretest": "npm run build",
     "test": "node --test tests/",
-    "check": "tsc --noEmit && node --test tests/"
+    "check": "tsc --noEmit && node --test tests/",
+    "prepack": "npm run build"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
     "@deepseek-ai/dsh-credentials": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-launch-environment": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-llm": ">=0.2.2-rc.5 <0.3.0",
+    "@deepseek-ai/dsh-timeout": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0",
     "@deepseek-ai/schemastery": "~3.19.0"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-credentials": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-launch-environment": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-tools": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
@@ -61,6 +60,15 @@
     "@deepseek-ai/schemastery": "3.19.0",
     "@types/node": "^24.19.2",
     "esbuild": "0.28.2",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "@deepseek-ai/dsh-timeout": "0.2.2-rc.5",
+    "@deepseek-ai/cordis-plugin-loader": "1.1.0"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
   }
 }

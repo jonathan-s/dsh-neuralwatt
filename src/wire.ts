@@ -1,20 +1,29 @@
 /**
  * Wire layer for Neuralwatt's OpenAI-compatible Chat Completions endpoint:
- * provider-neutral harness messages to a JSON request body, and SSE frames back
- * to harness `StreamChunk` values.
+ * provider-neutral harness messages to a JSON request body, SSE frames back to
+ * harness `StreamChunk` values, and provider failures to the harness's canonical
+ * codes.
  *
  * @module dsh-neuralwatt-provider/wire
  */
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import {
+  LlmError,
+  ProviderRequestId,
+  isContextWindowExceededError,
+  isQuotaExceededError,
+  offloadedImageText,
+} from '@deepseek-ai/dsh-llm'
 import type {
+  BuiltinLlmFailureCode,
   ContentBlock,
+  FinishReason,
   GenerateOptions,
   RequestMessage,
   StreamChunk,
   TokenUsage,
   ToolCallId,
 } from '@deepseek-ai/dsh-llm'
-import type { Catalog, CatalogModel } from './catalog.js'
+import type { CatalogModel } from './catalog.js'
 
 /** One request-ready image, already encoded by the attachment service. */
 export interface WireImage {
@@ -46,18 +55,22 @@ interface WireToolCall {
   function: { name: string; arguments: string }
 }
 
-/** Text of a message's non-image blocks. */
+/** Last-resort text for an image the request could not carry. */
+function vanishedImageText(block: Extract<ContentBlock, { type: 'image' }>): string {
+  const name = block.attachment.name ?? block.attachment.mediaType
+  return `[image omitted from the request: ${name}]`
+}
+
+/** Text of a message's non-image blocks, with every image represented as text. */
 function textOf(content: readonly ContentBlock[], images: ImageMap): string {
   return content.flatMap((block) => {
     switch (block.type) {
       case 'text': return [block.text]
       case 'image': {
-        const image = images.get(block.attachment.attachmentId)
-        return block.offloaded === true || image === undefined
-          ? [`[image omitted from the request: ${block.attachment.name ?? block.attachment.mediaType}]`]
-          : []
+        if (block.offloaded === true) return [offloadedImageText(block.attachment)]
+        return images.has(block.attachment.attachmentId) ? [] : [vanishedImageText(block)]
       }
-      case 'file': return [`[file ${block.attachment.name}, ${block.attachment.bytes} bytes — read it with the file tools]`]
+      case 'file': return [`[file ${block.attachment.name}, ${block.attachment.bytes} bytes; read it with the file tools]`]
       default: return []
     }
   }).filter(text => text.length > 0).join('\n')
@@ -72,23 +85,39 @@ function userContent(content: readonly ContentBlock[], images: ImageMap): string
       continue
     }
     if (block.type === 'image') {
-      const image = images.get(block.attachment.attachmentId)
-      if (block.offloaded === true || image === undefined) {
-        parts.push({ type: 'text', text: `[image omitted from the request: ${block.attachment.name ?? block.attachment.mediaType}]` })
+      const image = block.offloaded === true ? undefined : images.get(block.attachment.attachmentId)
+      if (image === undefined) {
+        parts.push({
+          type: 'text',
+          text: block.offloaded === true ? offloadedImageText(block.attachment) : vanishedImageText(block),
+        })
         continue
       }
       parts.push({ type: 'image_url', image_url: { url: `data:${image.mediaType};base64,${image.base64}` } })
       continue
     }
     if (block.type === 'file') {
-      parts.push({ type: 'text', text: `[file ${block.attachment.name}, ${block.attachment.bytes} bytes — read it with the file tools]` })
+      parts.push({ type: 'text', text: `[file ${block.attachment.name}, ${block.attachment.bytes} bytes; read it with the file tools]` })
     }
   }
   return parts.every(part => part.type === 'text') ? parts.map(part => part.text ?? '').join('\n') : parts
 }
 
-/** Assistant history, replaying preserved thinking only where the endpoint reads it. */
-function assistantMessage(message: RequestMessage, images: ImageMap, compat: CatalogModel['compat']): WireMessage {
+/**
+ * Assistant history, replaying preserved thinking only to the model that
+ * produced it.
+ *
+ * A route can serve several models, and one model's reasoning text is not
+ * another's history: the envelope names the authoring model, and only a matching
+ * model receives the text back. An endpoint that requires `reasoning_content` on
+ * every assistant message while thinking is on receives an empty string for
+ * history some other model authored, which is what "requires" means.
+ */
+function assistantMessage(
+  message: RequestMessage,
+  options: GenerateOptions<string>,
+  compat: CatalogModel['compat'],
+): WireMessage {
   const content = message.content
   const text = content.filter(block => block.type === 'text').map(block => block.text).join('')
   const calls = content.filter(block => block.type === 'tool-call').map(block => ({
@@ -97,14 +126,18 @@ function assistantMessage(message: RequestMessage, images: ImageMap, compat: Cat
     function: { name: block.name, arguments: block.arguments.length > 0 ? block.arguments : '{}' },
   }))
   const reasoning = content.filter(block => block.type === 'reasoning').map(block => block.text).join('')
-  void images
+  const source = message.role === 'assistant' ? message.source : undefined
+  const sameModel = source !== undefined
+    && source.provider === options.provider
+    && source.model === options.model
+  const replay = compat?.requiresReasoningContentOnAssistantMessages === true
   return {
     role: 'assistant',
     content: text.length > 0 ? text : null,
     ...calls.length === 0 ? {} : { tool_calls: calls },
-    ...compat?.requiresReasoningContentOnAssistantMessages === true && reasoning.length > 0
-      ? { reasoning_content: reasoning }
-      : {},
+    ...!replay
+      ? {}
+      : sameModel && reasoning.length > 0 ? { reasoning_content: reasoning } : { reasoning_content: '' },
   }
 }
 
@@ -122,6 +155,11 @@ export function serialize(
 ): Record<string, unknown> {
   const compat = model?.compat
   const messages: WireMessage[] = []
+  // One-shot callers pass their instruction in `system`; loop-built requests
+  // carry a system-role message instead, and both reach the model's system slot.
+  if (typeof options.system === 'string' && options.system.length > 0) {
+    messages.push({ role: 'system', content: options.system })
+  }
   for (const message of options.messages) {
     switch (message.role) {
       case 'system':
@@ -134,7 +172,7 @@ export function serialize(
         messages.push({ role: 'user', content: userContent(message.content, images) })
         break
       case 'assistant':
-        messages.push(assistantMessage(message, images, compat))
+        messages.push(assistantMessage(message, options, compat))
         break
       case 'tool': {
         const text = textOf(message.content, images)
@@ -289,6 +327,20 @@ export class BlockBuilder {
     return this.calls.size > 0
   }
 
+  /** Whether any content block was opened at all. */
+  hasBlocks(): boolean {
+    return this.nextIndex > 0
+  }
+
+  /** Per-block metadata for the replay envelope, in emission order. */
+  blockTypes(): { type: 'text' | 'reasoning' | 'tool-call' }[] {
+    const entries: { index: number; type: 'text' | 'reasoning' | 'tool-call' }[] = []
+    if (this.text !== undefined) entries.push({ index: this.text.index, type: 'text' })
+    if (this.reasoning !== undefined) entries.push({ index: this.reasoning.index, type: 'reasoning' })
+    for (const call of this.calls.values()) entries.push({ index: call.index, type: 'tool-call' })
+    return entries.sort((left, right) => left.index - right.index).map(entry => ({ type: entry.type }))
+  }
+
   /** Close every open block in emission (index) order. */
   finish(): StreamChunk[] {
     const chunks: StreamChunk[] = []
@@ -343,7 +395,7 @@ export function mapUsage(raw: unknown): TokenUsage | undefined {
 }
 
 /** Map an OpenAI finish reason onto the harness's terminal reason. */
-export function mapFinish(reason: string | undefined, hasToolCalls: boolean): StreamChunk {
+export function mapFinish(reason: string | undefined, hasToolCalls: boolean): { type: 'finish'; reason: FinishReason } {
   if (reason === 'length') return { type: 'finish', reason: { kind: 'max-tokens' } }
   if (hasToolCalls || reason === 'tool_calls' || reason === 'function_call') {
     return { type: 'finish', reason: { kind: 'tool-calls' } }
@@ -351,17 +403,81 @@ export function mapFinish(reason: string | undefined, hasToolCalls: boolean): St
   return { type: 'finish', reason: { kind: 'stop' } }
 }
 
-/** Provider error payload to a typed harness failure. */
-export function providerError(payload: unknown, status?: number): LlmError {
-  const detail = payload !== null && typeof payload === 'object'
-    ? (payload as Record<string, any>).error ?? payload
-    : undefined
-  const message = detail !== null && typeof detail === 'object'
-    ? String((detail as Record<string, any>).message ?? JSON.stringify(detail))
-    : typeof detail === 'string' ? detail : 'Neuralwatt API request failed'
-  return LlmError.fromFailure({
-    message: `Neuralwatt: ${message}`,
-    code: typeof (detail as any)?.code === 'string' ? (detail as any).code : 'PROVIDER_HTTP_ERROR',
+/** Join the provider error fields into the text the classifiers read. */
+function errorDetail(raw: unknown): string {
+  if (raw === null || typeof raw !== 'object') return ''
+  const envelope = raw as Record<string, unknown>
+  const error = envelope.error !== null && typeof envelope.error === 'object'
+    ? envelope.error as Record<string, unknown>
+    : envelope
+  const fields = [error.code, error.type, error.message]
+  const detail = fields.filter((value): value is string => typeof value === 'string').join(' ')
+  return detail.length > 0 ? detail : JSON.stringify(envelope)
+}
+
+/** Read a positive Retry-After delay in milliseconds, from delta-seconds or an HTTP date. */
+function retryAfterMs(headers: Headers | undefined): number | undefined {
+  const raw = headers?.get('retry-after')
+  if (raw === null || raw === undefined || raw.length === 0) return undefined
+  const seconds = /^\d+(?:\.\d+)?$/u.test(raw) ? Number(raw) * 1000 : Date.parse(raw) - Date.now()
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined
+}
+
+/** Read the provider request id from the headers this endpoint uses. */
+function requestId(headers: Headers | undefined): ProviderRequestId | undefined {
+  for (const name of ['x-request-id', 'request-id', 'x-nw-request-id']) {
+    const value = headers?.get(name)
+    if (typeof value === 'string' && value.length > 0) return ProviderRequestId(value)
+  }
+  return undefined
+}
+
+/**
+ * Classify one provider failure into the harness's provider-neutral taxonomy.
+ *
+ * The code decides what happens next: `RATE_LIMIT`, `SERVER`, `TIMEOUT`,
+ * `TRANSPORT`, and `EMPTY_RESPONSE` are the retry executor's defaults,
+ * `CONTEXT_WINDOW_EXCEEDED` hands the step to compaction, and `QUOTA` / `AUTH`
+ * are terminal and surface remediation in the client. A positive Retry-After
+ * replaces local backoff at the executor.
+ * @param payload - decoded error body, or an in-band stream error frame.
+ * @param status - HTTP status when the failure preceded streaming.
+ * @param headers - response headers, for retry delay and request identity.
+ * @returns the typed failure.
+ */
+export function providerError(payload: unknown, status?: number, headers?: Headers): LlmError {
+  const detail = errorDetail(payload)
+  const envelope = (payload !== null && typeof payload === 'object' ? payload : {}) as Record<string, any>
+  const error = envelope.error !== null && typeof envelope.error === 'object' ? envelope.error as Record<string, any> : envelope
+  const message = typeof error.message === 'string' && error.message.length > 0
+    ? error.message
+    : `Neuralwatt request failed${status === undefined ? '' : ` (HTTP ${status})`}`
+  const declared = typeof error.code === 'string' ? error.code.toUpperCase() : ''
+  const declaredType = typeof error.type === 'string' ? error.type : ''
+  let code: BuiltinLlmFailureCode
+  if (status === 401 || status === 403
+    || declared === 'AUTHENTICATION_ERROR' || declared === 'PERMISSION_ERROR' || declaredType === 'authentication_error') {
+    code = 'AUTH'
+  } else if (isQuotaExceededError(detail) || status === 402
+    || declared === 'INSUFFICIENT_QUOTA' || declaredType === 'insufficient_quota') {
+    code = 'QUOTA'
+  } else if (status === 429 || declared === 'RATE_LIMIT' || declared === 'RATE_LIMIT_EXCEEDED'
+    || declaredType === 'rate_limit_error') {
+    code = 'RATE_LIMIT'
+  } else if (isContextWindowExceededError(detail)) {
+    code = 'CONTEXT_WINDOW_EXCEEDED'
+  } else if (status === 400 || status === 413 || status === 422 || declaredType === 'invalid_request_error') {
+    code = 'INVALID_REQUEST'
+  } else if (status !== undefined && status >= 500) {
+    code = 'SERVER'
+  } else {
+    code = status === undefined ? 'SERVER' : `HTTP_${status}`
+  }
+  const delay = retryAfterMs(headers)
+  const id = requestId(headers)
+  return new LlmError(`Neuralwatt: ${message}`, code, {
     ...status === undefined ? {} : { status },
+    ...id === undefined ? {} : { requestId: id },
+    ...delay === undefined ? {} : { providerRetryAfterMs: delay },
   })
 }
